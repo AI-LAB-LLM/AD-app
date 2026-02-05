@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scrollRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:overScrollMode="never"
+    android:scrollbars="none"
+    android:paddingStart="26dp"
+    android:paddingEnd="26dp"
+    android:paddingTop="22dp"
+    android:paddingBottom="26dp">
+
+    <LinearLayout
+        android:id="@+id/content"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:gravity="center_horizontal">
+
+        <TextView
+            android:id="@+id/tvLux"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="조도: - lux"
+            android:textSize="18sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:lineSpacingExtra="2dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+
+        <TextView
+            android:id="@+id/tvNoise"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="소음(상대): - dBFS"
+            android:textSize="18sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:lineSpacingExtra="2dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="14dp" />
+
+        <TextView
+            android:id="@+id/tvWifi"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="WiFi: -"
+            android:textSize="16sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingTop="6dp"
+            android:paddingBottom="12dp" />
+
+        <Button
+            android:id="@+id/btnStart"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="44dp"
+            android:text="측정 시작" />
+
+        <Button
+            android:id="@+id/btnStop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="44dp"
+            android:layout_marginTop="10dp"
+            android:text="측정 중단"
+            android:enabled="false" />
+
+        <!-- 아래가 원형 화면에서 잘릴 때 대비 여유 -->
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="10dp" />
+
+    </LinearLayout>
+</ScrollView>
