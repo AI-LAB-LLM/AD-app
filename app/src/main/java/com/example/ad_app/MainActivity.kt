@@ -14,6 +14,8 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import com.example.ad_app.bio.BioMeasureService
+import com.example.ad_app.env.EnvMeasureService
 
 class MainActivity : AppCompatActivity() {
 
@@ -22,47 +24,86 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvLux: TextView
     private lateinit var tvNoise: TextView
     private lateinit var tvWifi: TextView
+
+    private lateinit var tvHr: TextView
+    private lateinit var tvSteps: TextView
+    private lateinit var tvHrv: TextView
+
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
 
     private var receiverRegistered = false
 
+    private val PERM_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
+    private val SDK_36 = 36
+
     private val updateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action != EnvMeasureService.ACTION_UPDATE) return
+            when (intent?.action) {
 
-            val lux = intent.getFloatExtra(EnvMeasureService.EXTRA_LUX, -1f)
-            val db = intent.getFloatExtra(EnvMeasureService.EXTRA_DBFS, -120f)
-            val ssid = intent.getStringExtra(EnvMeasureService.EXTRA_SSID).orEmpty()
-            val place = intent.getStringExtra(EnvMeasureService.EXTRA_PLACE).orEmpty()
+                // 환경 데이터
+                EnvMeasureService.ACTION_UPDATE -> {
+                    val lux = intent.getFloatExtra(EnvMeasureService.EXTRA_LUX, -1f)
+                    val db = intent.getFloatExtra(EnvMeasureService.EXTRA_DBFS, -120f)
+                    val ssid = intent.getStringExtra(EnvMeasureService.EXTRA_SSID).orEmpty()
+                    val place = intent.getStringExtra(EnvMeasureService.EXTRA_PLACE).orEmpty()
 
-            tvLux.text = if (lux >= 0) "조도: %.1f lux".format(lux) else "조도: -"
-            tvNoise.text = "소음(상대): %.1f dBFS".format(db)
+                    tvLux.text = if (lux >= 0) "조도: %.1f lux".format(lux) else "조도: -"
+                    tvNoise.text = "소음(상대): %.1f dBFS".format(db)
 
-            // ssid가 ""면 읽기 실패(권한/설정/비WiFi 등)
-            val ssidText = if (ssid.isBlank()) "-" else ssid
-            val placeText = if (place.isBlank()) "unknown" else place
-            tvWifi.text = "WiFi: $ssidText  ($placeText)"
+                    val ssidText = if (ssid.isBlank()) "-" else ssid
+                    val placeText = if (place.isBlank()) "unknown" else place
+                    tvWifi.text = "WiFi: $ssidText  ($placeText)"
+                }
+
+                // 생체 데이터
+                BioMeasureService.ACTION_UPDATE -> {
+                    val hr = intent.getFloatExtra(BioMeasureService.EXTRA_HR_BPM, -1f)
+                    val stepsDaily = intent.getLongExtra(BioMeasureService.EXTRA_STEPS_DAILY, -1L)
+                    val stepsPerMin = intent.getFloatExtra(BioMeasureService.EXTRA_STEPS_PER_MIN, 0f)
+                    val hrvRmssd = intent.getFloatExtra(BioMeasureService.EXTRA_HRV_RMSSD, -1f)
+
+                    tvHr.text = if (hr >= 0) "심박: %.0f bpm".format(hr) else "심박: - bpm"
+
+                    tvSteps.text = if (stepsDaily >= 0) {
+                        "걸음 수(오늘): $stepsDaily  (≈%.0f spm)".format(stepsPerMin)
+                    } else {
+                        "걸음 수(오늘): -"
+                    }
+
+                    tvHrv.text = if (hrvRmssd >= 0) "HRV(RMSSD): %.1f ms".format(hrvRmssd) else "HRV(RMSSD): - ms"
+                }
+            }
         }
     }
 
     private val requestAllPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
+
         val micOk = result[Manifest.permission.RECORD_AUDIO] == true ||
                 ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
-        // Wi-Fi SSID는 기기/OS별로 위치권한 or nearby-wifi 권한이 필요할 수 있음
         val fineOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarseOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
         val nearbyOk = if (Build.VERSION.SDK_INT >= 33) {
             ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
         } else true
 
-        Log.i(TAG, "perm mic=$micOk fine=$fineOk coarse=$coarseOk nearby=$nearbyOk")
+        val activityOk =
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
 
+        val hrOk = if (Build.VERSION.SDK_INT >= SDK_36) {
+            ContextCompat.checkSelfPermission(this, PERM_READ_HEART_RATE) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) == PackageManager.PERMISSION_GRANTED
+        }
+
+        Log.i(TAG, "perm mic=$micOk fine=$fineOk coarse=$coarseOk nearby=$nearbyOk activity=$activityOk hr=$hrOk")
+
+        // 기존 정책 유지: 마이크 권한이 있어야 “측정 시작”
         if (micOk) {
-            // 마이크만 OK면 측정은 가능. Wi-Fi는 허용 안 해도 unknown으로 처리됨.
             startServiceMeasuring()
         } else {
             tvNoise.text = "소음(상대): 마이크 권한 필요"
@@ -76,6 +117,11 @@ class MainActivity : AppCompatActivity() {
         tvLux = findViewById(R.id.tvLux)
         tvNoise = findViewById(R.id.tvNoise)
         tvWifi = findViewById(R.id.tvWifi)
+
+        tvHr = findViewById(R.id.tvHr)
+        tvSteps = findViewById(R.id.tvSteps)
+        tvHrv = findViewById(R.id.tvHrv)
+
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
 
@@ -96,29 +142,40 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
-        unregisterUpdateReceiver() // 앱 나가도 서비스는 계속, 리시버만 해제
+        unregisterUpdateReceiver()
     }
 
     private fun ensurePermissionsThenStart() {
         val need = mutableListOf<String>()
 
+        // Env
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             need += Manifest.permission.RECORD_AUDIO
         }
-
-        // SSID 읽기용: 보통 위치권한이 필요
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             need += Manifest.permission.ACCESS_COARSE_LOCATION
         }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             need += Manifest.permission.ACCESS_FINE_LOCATION
         }
-
-        // Android 13+ 기기에서 Wi-Fi 접근이 막히는 경우 대비
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) != PackageManager.PERMISSION_GRANTED
         ) {
             need += Manifest.permission.NEARBY_WIFI_DEVICES
+        }
+
+        // Bio
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+            need += Manifest.permission.ACTIVITY_RECOGNITION
+        }
+        if (Build.VERSION.SDK_INT >= SDK_36) {
+            if (ContextCompat.checkSelfPermission(this, PERM_READ_HEART_RATE) != PackageManager.PERMISSION_GRANTED) {
+                need += PERM_READ_HEART_RATE
+            }
+        } else {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+                need += Manifest.permission.BODY_SENSORS
+            }
         }
 
         if (need.isEmpty()) {
@@ -130,6 +187,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshButtons() {
+        // 지금은 EnvMeasureService 실행 여부로 버튼 상태를 잡음
         val running = EnvMeasureService.isRunning
         btnStart.isEnabled = !running
         btnStop.isEnabled = running
@@ -137,25 +195,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun startServiceMeasuring() {
         Log.i(TAG, "startServiceMeasuring()")
-        val i = Intent(this, EnvMeasureService::class.java).apply {
+
+        // 1) 환경 측정
+        val env = Intent(this, EnvMeasureService::class.java).apply {
             action = EnvMeasureService.ACTION_START
         }
-        ContextCompat.startForegroundService(this, i)
+        ContextCompat.startForegroundService(this, env)
+
+        // 2) 생체 측정
+        val bio = Intent(this, BioMeasureService::class.java).apply {
+            action = BioMeasureService.ACTION_START
+        }
+        startService(bio)
+
         refreshButtons()
     }
 
     private fun stopServiceMeasuring() {
         Log.i(TAG, "stopServiceMeasuring()")
-        val i = Intent(this, EnvMeasureService::class.java).apply {
+
+        val env = Intent(this, EnvMeasureService::class.java).apply {
             action = EnvMeasureService.ACTION_STOP
         }
-        startService(i)
+        startService(env)
+
+        val bio = Intent(this, BioMeasureService::class.java).apply {
+            action = BioMeasureService.ACTION_STOP
+        }
+        startService(bio)
+
         refreshButtons()
     }
 
     private fun registerUpdateReceiver() {
         if (receiverRegistered) return
-        val filter = IntentFilter(EnvMeasureService.ACTION_UPDATE)
+
+        val filter = IntentFilter().apply {
+            addAction(EnvMeasureService.ACTION_UPDATE)
+            addAction(BioMeasureService.ACTION_UPDATE)
+        }
 
         ContextCompat.registerReceiver(
             this,
