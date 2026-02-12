@@ -110,8 +110,7 @@ class BioMeasureService : Service() {
         Log.i(TAG, "stopBioAndSelf()")
 
         try {
-            // 반환값(ListenableFuture)은 사용 안 해도 됨 (근데 타입은 classpath에 있어야 컴파일됨)
-            //passiveClient.clearPassiveListenerCallbackAsync()
+            passiveClient.clearPassiveListenerCallbackAsync()
         } catch (e: Exception) {
             Log.w(TAG, "clearPassiveListenerCallbackAsync failed: ${e.message}")
         }

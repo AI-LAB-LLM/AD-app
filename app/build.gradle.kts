@@ -40,7 +40,7 @@ android {
 dependencies {
 
     implementation("androidx.health:health-services-client:1.1.0-beta01")
-    implementation("com.google.guava:listenablefuture:1.0")
+    implementation("com.google.guava:guava:32.1.3-android")
     implementation("androidx.concurrent:concurrent-futures-ktx:1.1.0")
 
     implementation(libs.androidx.core.ktx)
