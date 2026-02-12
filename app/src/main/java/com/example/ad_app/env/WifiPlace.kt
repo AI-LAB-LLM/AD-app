@@ -1,4 +1,4 @@
-package com.example.ad_app
+package com.example.ad_app.env
 
 import android.content.Context
 import android.net.ConnectivityManager

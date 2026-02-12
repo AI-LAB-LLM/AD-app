@@ -1,4 +1,4 @@
-package com.example.ad_app
+package com.example.ad_app.env
 
 import android.Manifest
 import android.annotation.SuppressLint
@@ -19,6 +19,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.ad_app.R
 import kotlin.math.log10
 import kotlin.math.sqrt
 
