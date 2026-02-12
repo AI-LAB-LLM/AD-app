@@ -38,6 +38,9 @@ android {
 }
 
 dependencies {
+
+    implementation("androidx.health:health-services-client:1.1.0-beta01")
+
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
