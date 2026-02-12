@@ -53,6 +53,40 @@
             android:paddingTop="6dp"
             android:paddingBottom="12dp" />
 
+        <TextView
+            android:id="@+id/tvHr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="심박: - bpm"
+            android:textSize="18sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+
+        <TextView
+            android:id="@+id/tvSteps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="걸음 수(오늘): -"
+            android:textSize="18sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp" />
+
+        <TextView
+            android:id="@+id/tvHrv"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="HRV(RMSSD): - ms"
+            android:textSize="16sp"
+            android:gravity="center"
+            android:includeFontPadding="false"
+            android:paddingTop="6dp"
+            android:paddingBottom="12dp" />
+
+
         <Button
             android:id="@+id/btnStart"
             android:layout_width="match_parent"
