@@ -1,21 +1,20 @@
 package com.example.ad_app
 
 import android.Manifest
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.content.*
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.example.ad_app.bio.BioMeasureService
 import com.example.ad_app.env.EnvMeasureService
+import java.io.File
 
 class MainActivity : AppCompatActivity() {
 
@@ -34,13 +33,22 @@ class MainActivity : AppCompatActivity() {
 
     private var receiverRegistered = false
 
+    // Wear OS/Android 16 대비(Health permission)
     private val PERM_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
-    private val SDK_36 = 36
+    private val TARGET_SDK_36 = 36
+
+    private fun shouldUseHealthPermission(): Boolean {
+        return applicationInfo.targetSdkVersion >= TARGET_SDK_36
+    }
+
+    private fun logDirPath(): String {
+        val dir = File(getExternalFilesDir(null), "ad_logs")
+        return dir.absolutePath
+    }
 
     private val updateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-
                 // 환경 데이터
                 EnvMeasureService.ACTION_UPDATE -> {
                     val lux = intent.getFloatExtra(EnvMeasureService.EXTRA_LUX, -1f)
@@ -71,7 +79,11 @@ class MainActivity : AppCompatActivity() {
                         "걸음 수(오늘): -"
                     }
 
-                    tvHrv.text = if (hrvRmssd >= 0) "HRV(RMSSD): %.1f ms".format(hrvRmssd) else "HRV(RMSSD): - ms"
+                    tvHrv.text = if (hrvRmssd >= 0) {
+                        "HRV(RMSSD): %.1f ms".format(hrvRmssd)
+                    } else {
+                        "HRV(RMSSD): - ms"
+                    }
                 }
             }
         }
@@ -79,11 +91,9 @@ class MainActivity : AppCompatActivity() {
 
     private val requestAllPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
+    ) { _ ->
 
-        val micOk = result[Manifest.permission.RECORD_AUDIO] == true ||
-                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-
+        val micOk = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         val fineOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         val coarseOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
@@ -91,22 +101,22 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
         } else true
 
-        val activityOk =
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
+        val activityOk = ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED
 
-        val hrOk = if (Build.VERSION.SDK_INT >= SDK_36) {
+        val bodySensorsOk = ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) == PackageManager.PERMISSION_GRANTED
+
+        val readHrOk = if (shouldUseHealthPermission()) {
             ContextCompat.checkSelfPermission(this, PERM_READ_HEART_RATE) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) == PackageManager.PERMISSION_GRANTED
-        }
+        } else true
 
-        Log.i(TAG, "perm mic=$micOk fine=$fineOk coarse=$coarseOk nearby=$nearbyOk activity=$activityOk hr=$hrOk")
+        Log.i(TAG, "perm mic=$micOk fine=$fineOk coarse=$coarseOk nearby=$nearbyOk activity=$activityOk bodySensors=$bodySensorsOk readHr=$readHrOk targetSdk=${applicationInfo.targetSdkVersion}")
 
-        // 기존 정책 유지: 마이크 권한이 있어야 “측정 시작”
+        // 기존 정책 유지: 마이크 권한 있어야 시작
         if (micOk) {
             startServiceMeasuring()
         } else {
             tvNoise.text = "소음(상대): 마이크 권한 필요"
+            Toast.makeText(this, "마이크 권한이 필요해요", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -130,8 +140,10 @@ class MainActivity : AppCompatActivity() {
         btnStart.setOnClickListener { ensurePermissionsThenStart() }
         btnStop.setOnClickListener {
             stopServiceMeasuring()
-            finish() // “측정 중단 눌러야 앱 꺼지게” 유지
+            finish()
         }
+
+        Log.i(TAG, "CSV dir: ${logDirPath()}")
     }
 
     override fun onStart() {
@@ -146,7 +158,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensurePermissionsThenStart() {
-        val need = mutableListOf<String>()
+        val need = LinkedHashSet<String>() // 중복 방지
 
         // Env
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -168,45 +180,45 @@ class MainActivity : AppCompatActivity() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
             need += Manifest.permission.ACTIVITY_RECOGNITION
         }
-        if (Build.VERSION.SDK_INT >= SDK_36) {
-            if (ContextCompat.checkSelfPermission(this, PERM_READ_HEART_RATE) != PackageManager.PERMISSION_GRANTED) {
-                need += PERM_READ_HEART_RATE
-            }
-        } else {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
-                need += Manifest.permission.BODY_SENSORS
-            }
+
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BODY_SENSORS) != PackageManager.PERMISSION_GRANTED) {
+            need += Manifest.permission.BODY_SENSORS
+        }
+
+        if (shouldUseHealthPermission() &&
+            ContextCompat.checkSelfPermission(this, PERM_READ_HEART_RATE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            need += PERM_READ_HEART_RATE
         }
 
         if (need.isEmpty()) {
             startServiceMeasuring()
         } else {
-            Log.i(TAG, "Request permissions: $need")
+            Log.i(TAG, "Request permissions: $need (targetSdk=${applicationInfo.targetSdkVersion})")
             requestAllPermissions.launch(need.toTypedArray())
         }
     }
 
     private fun refreshButtons() {
-        // 지금은 EnvMeasureService 실행 여부로 버튼 상태를 잡음
-        val running = EnvMeasureService.isRunning
+        val running = EnvMeasureService.isRunning || BioMeasureService.isRunning
         btnStart.isEnabled = !running
         btnStop.isEnabled = running
     }
 
     private fun startServiceMeasuring() {
         Log.i(TAG, "startServiceMeasuring()")
+        Toast.makeText(this, "CSV 저장 위치: ${logDirPath()}", Toast.LENGTH_LONG).show()
 
-        // 1) 환경 측정
         val env = Intent(this, EnvMeasureService::class.java).apply {
             action = EnvMeasureService.ACTION_START
         }
         ContextCompat.startForegroundService(this, env)
 
-        // 2) 생체 측정
         val bio = Intent(this, BioMeasureService::class.java).apply {
             action = BioMeasureService.ACTION_START
         }
-        startService(bio)
+        // BioMeasureService가 FGS면 여기서도 startForegroundService 사용 권장
+        ContextCompat.startForegroundService(this, bio)
 
         refreshButtons()
     }
@@ -214,17 +226,11 @@ class MainActivity : AppCompatActivity() {
     private fun stopServiceMeasuring() {
         Log.i(TAG, "stopServiceMeasuring()")
 
-        val env = Intent(this, EnvMeasureService::class.java).apply {
-            action = EnvMeasureService.ACTION_STOP
-        }
-        startService(env)
-
-        val bio = Intent(this, BioMeasureService::class.java).apply {
-            action = BioMeasureService.ACTION_STOP
-        }
-        startService(bio)
+        startService(Intent(this, EnvMeasureService::class.java).apply { action = EnvMeasureService.ACTION_STOP })
+        startService(Intent(this, BioMeasureService::class.java).apply { action = BioMeasureService.ACTION_STOP })
 
         refreshButtons()
+        Toast.makeText(this, "저장된 CSV는 Device Explorer/adb로 추출 가능해요", Toast.LENGTH_SHORT).show()
     }
 
     private fun registerUpdateReceiver() {
