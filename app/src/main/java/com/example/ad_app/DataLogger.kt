@@ -22,13 +22,13 @@ object DataLogger {
     private const val FLUSH_INTERVAL_MS = 60_000L    // 60초마다 flush
     private const val DIR_NAME = "ad_logs"
 
-    // stale 기준(age/valid 판단 보조용)
+    // stale 기준
     private const val STALE_ENV_MS = 30_000L
     private const val STALE_HR_MS = 15_000L
     private const val STALE_HRV_MS = 15_000L
     private const val STALE_STEPS_MS = 30_000L
 
-    // HRV 유효성 기준(보수적으로) - valid 표시용
+    // HRV 유효성 기준
     private const val HRV_MIN_N = 10
     private const val HRV_MIN_MS = 5f
     private const val HRV_MAX_MS = 150f
@@ -98,7 +98,7 @@ object DataLogger {
 
     fun getCurrentFilePath(): String? = currentFile?.absolutePath
 
-    // 서비스에서 호출: 최신값만 갱신(파일 I/O 없음)
+    // ---------- Env ----------
     fun updateEnv(lux: Float, dbfs: Float, ssid: String?, place: String) {
         envLux = if (lux >= 0) lux else null
         envDbfs = dbfs
@@ -107,29 +107,27 @@ object DataLogger {
         envUpdatedAt = System.currentTimeMillis()
     }
 
-    /**
-     * HRV sampleCount(n)을 같이 받음
-     */
-    fun updateBio(
-        hrBpm: Float,
-        hrvRmssd: Float,
-        hrvSampleCount: Int,
+    // ---------- Bio ----------
+    fun updateBioHr(hrBpm: Float) {
+        if (hrBpm < 0) return
+        bioHr = hrBpm
+        bioHrUpdatedAt = System.currentTimeMillis()
+    }
+
+    fun updateBioHrv(hrvRmssd: Float, hrvSampleCount: Int) {
+        if (hrvRmssd < 0) return
+        val now = System.currentTimeMillis()
+        bioHrv = hrvRmssd
+        bioHrvN = hrvSampleCount.takeIf { it >= 0 }
+        bioHrvUpdatedAt = now
+    }
+
+    fun updateBioSteps(
         stepsDaily: Long,
         stepsDelta: Long,
         stepsPerMin: Float
     ) {
         val now = System.currentTimeMillis()
-
-        if (hrBpm >= 0) {
-            bioHr = hrBpm
-            bioHrUpdatedAt = now
-        }
-
-        if (hrvRmssd >= 0) {
-            bioHrv = hrvRmssd
-            bioHrvN = hrvSampleCount.takeIf { it >= 0 }
-            bioHrvUpdatedAt = now
-        }
 
         if (stepsDaily >= 0) bioStepsDaily = stepsDaily
         bioStepsDelta = stepsDelta
@@ -168,33 +166,30 @@ object DataLogger {
             val hrvAge = bioHrvUpdatedAt.takeIf { it > 0 }?.let { now - it }
             val stepsAge = bioStepsUpdatedAt.takeIf { it > 0 }?.let { now - it }
 
-            // Env는 stale이면 비워도 괜찮음(환경센서가 잠깐 끊겨도 분석 큰 문제 없음)
+            // Env는 stale이면 비움
             val luxOut = if (envAge != null && envAge <= STALE_ENV_MS) envLux else null
             val dbfsOut = if (envAge != null && envAge <= STALE_ENV_MS) envDbfs else null
             val ssidOut = if (envAge != null && envAge <= STALE_ENV_MS) envSsid else null
             val placeOut = if (envAge != null && envAge <= STALE_ENV_MS) envPlace else null
 
-            // HR/HRV/Steps는 "값을 비우지 않고" 마지막 값을 그대로 기록
+            // HR / Steps / HRV는 마지막 값 유지
             val hrOut = bioHr
             val hrvOut = bioHrv
-
+            val hrvNOut = bioHrvN
             val stepsDailyOut = bioStepsDaily
             val stepsDeltaOut = bioStepsDelta
             val stepsPerMinOut = bioStepsPerMin
 
-            // 유효성은 컬럼으로만 표시 (값은 기록)
             val hrvValidInt = run {
-                val rmssd = bioHrv
-                val n = bioHrvN
-                val basicOk = rmssd != null &&
-                        n != null &&
-                        n >= HRV_MIN_N &&
-                        rmssd in HRV_MIN_MS..HRV_MAX_MS
+                val rmssd = hrvOut
+                val n = hrvNOut
+                val basicOk =
+                    rmssd != null &&
+                            n != null &&
+                            n >= HRV_MIN_N &&
+                            rmssd in HRV_MIN_MS..HRV_MAX_MS
 
-                // stale까지 valid에 반영하고 싶으면 유지(지금은 유지)
-                val freshOk = hrvAge != null && hrvAge <= STALE_HRV_MS
-
-                if (basicOk && freshOk) 1 else 0
+                if (basicOk) 1 else 0
             }
 
             val line = buildLine(
@@ -212,7 +207,7 @@ object DataLogger {
                 envAgeMs = envAge,
                 hrAgeMs = hrAge,
                 hrvAgeMs = hrvAge,
-                hrvN = bioHrvN,
+                hrvN = hrvNOut,
                 hrvValid = hrvValidInt,
                 stepsAgeMs = stepsAge
             )
@@ -243,10 +238,9 @@ object DataLogger {
             currentDayKey = dayKey
             writer = BufferedWriter(FileWriter(file, true))
 
-            // 파일이 이미 있으면 헤더 중복 방지
             wroteHeader = file.exists() && file.length() > 0
-
             lastFlushAt = 0L
+
             Log.i(TAG, "opened file=${file.absolutePath} wroteHeader=$wroteHeader")
         }
     }

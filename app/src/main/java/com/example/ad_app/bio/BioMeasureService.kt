@@ -34,13 +34,13 @@ class BioMeasureService : Service() {
         const val EXTRA_STEPS_PER_MIN = "steps_per_min"
         const val EXTRA_HRV_RMSSD = "hrv_rmssd" // ms
 
-        @Volatile var isRunning: Boolean = false
+        @Volatile
+        var isRunning: Boolean = false
             private set
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // Health Services (HR / Steps)
     private lateinit var passiveClient: PassiveMonitoringClient
 
     @Volatile private var lastHr: Float = -1f
@@ -50,35 +50,37 @@ class BioMeasureService : Service() {
 
     private val stepEvents = ConcurrentLinkedQueue<Pair<Long, Long>>() // (tsMs, delta)
 
-    // HRV tracker
     private var hrvTracker: HrvTracker? = null
     @Volatile private var lastHrvRmssd: Float = -1f
-
-    // HRV 샘플 수(유효 IBI 개수) 저장
     @Volatile private var lastHrvN: Int = -1
 
-    // UI broadcast throttle (장기수집용으로 조금 느리게)
     private var lastBroadcastAt: Long = 0L
     private val UI_BROADCAST_INTERVAL_MS = 2000L
 
-    // logger register guard
     private var logRegistered = false
 
-    // foreground noti
     private val CHANNEL_ID = "bio_measure_channel"
     private val NOTI_ID = 1002
 
     private val passiveCallback = object : PassiveListenerCallback {
         override fun onNewDataPointsReceived(dataPoints: DataPointContainer) {
+            var changed = false
 
+            // HR
             dataPoints.getData(DataType.HEART_RATE_BPM).lastOrNull()?.let { dp ->
                 lastHr = dp.value.toFloat()
+                DataLogger.updateBioHr(lastHr)
+                changed = true
             }
 
+            // Steps daily
+            var gotStepsDaily = false
             dataPoints.getData(DataType.STEPS_DAILY).lastOrNull()?.let { dp ->
                 lastStepsDaily = dp.value
+                gotStepsDaily = true
             }
 
+            // Steps delta
             val deltas = dataPoints.getData(DataType.STEPS)
             if (deltas.isNotEmpty()) {
                 val sumDelta = deltas.sumOf { it.value }
@@ -90,16 +92,18 @@ class BioMeasureService : Service() {
                 lastStepsPerMin = computeStepsPerMin()
             }
 
-            DataLogger.updateBio(
-                hrBpm = lastHr,
-                hrvRmssd = lastHrvRmssd,
-                hrvSampleCount = lastHrvN,
-                stepsDaily = lastStepsDaily,
-                stepsDelta = lastStepsDelta,
-                stepsPerMin = lastStepsPerMin
-            )
+            if (gotStepsDaily || deltas.isNotEmpty()) {
+                DataLogger.updateBioSteps(
+                    stepsDaily = lastStepsDaily,
+                    stepsDelta = lastStepsDelta,
+                    stepsPerMin = lastStepsPerMin
+                )
+                changed = true
+            }
 
-            broadcastBioUpdateThrottled()
+            if (changed) {
+                broadcastBioUpdateThrottled()
+            }
         }
     }
 
@@ -110,16 +114,17 @@ class BioMeasureService : Service() {
 
         hrvTracker = HrvTracker(this) { rmssdMs, hrBpm, sampleCount ->
             lastHrvRmssd = rmssdMs
-            lastHrvN = sampleCount // HRV 샘플 수 갱신
-            if (hrBpm >= 0) lastHr = hrBpm
+            lastHrvN = sampleCount
 
-            DataLogger.updateBio(
-                hrBpm = lastHr,
+            if (hrBpm >= 0) {
+                lastHr = hrBpm
+                DataLogger.updateBioHr(lastHr)
+            }
+
+            // HRV는 "실제로 새로 계산됐을 때만" 갱신
+            DataLogger.updateBioHrv(
                 hrvRmssd = lastHrvRmssd,
-                hrvSampleCount = lastHrvN,
-                stepsDaily = lastStepsDaily,
-                stepsDelta = lastStepsDelta,
-                stepsPerMin = lastStepsPerMin
+                hrvSampleCount = lastHrvN
             )
 
             Log.d(TAG, "HRV rmssd=$rmssdMs ms, hr=$hrBpm bpm, n=$sampleCount")
@@ -190,11 +195,13 @@ class BioMeasureService : Service() {
 
     private fun startPassiveMonitoring() {
         val config = PassiveListenerConfig.builder()
-            .setDataTypes(setOf(
-                DataType.HEART_RATE_BPM,
-                DataType.STEPS_DAILY,
-                DataType.STEPS
-            ))
+            .setDataTypes(
+                setOf(
+                    DataType.HEART_RATE_BPM,
+                    DataType.STEPS_DAILY,
+                    DataType.STEPS
+                )
+            )
             .build()
 
         runCatching {
@@ -246,7 +253,6 @@ class BioMeasureService : Service() {
         sendBroadcast(i)
     }
 
-    // --- Notification ---
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
