@@ -7,7 +7,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
-
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -40,7 +40,7 @@
         <service
             android:name=".env.EnvMeasureService"
             android:exported="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="location|microphone" />
 
         <service
             android:name=".bio.BioMeasureService"

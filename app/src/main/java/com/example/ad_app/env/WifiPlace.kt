@@ -4,12 +4,10 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.wifi.WifiManager
+import android.annotation.SuppressLint
 
-/**
- * 현재 "연결된" Wi-Fi SSID를 가져옴.
- * - Wi-Fi가 아니면 null
- * - 권한/설정(Location OFF 등) 때문에 <unknown ssid>면 null
- */
+
+@SuppressLint("MissingPermission")
 fun getCurrentWifiSsid(context: Context): String? {
     val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     val network = cm.activeNetwork ?: return null
@@ -20,22 +18,25 @@ fun getCurrentWifiSsid(context: Context): String? {
     val info = wm.connectionInfo ?: return null
 
     val raw = info.ssid ?: return null
-    if (raw == WifiManager.UNKNOWN_SSID || raw == "<unknown ssid>") return null
-
-    // "\"blue\"" 처럼 따옴표가 붙는 경우가 있어 제거
-    return raw.trim().trim('"')
+    return sanitizeSsid(raw)
 }
 
-/**
- * SSID -> 장소 라벨로 매핑
- * - 여기서 "blue" = lab(연구실)
- */
+// SSID 문자열 정리
+fun sanitizeSsid(raw: String?): String? {
+    val s = raw?.trim()?.trim('"') ?: return null
+    if (s.isBlank()) return null
+    if (s == WifiManager.UNKNOWN_SSID) return null
+    if (s.equals("<unknown ssid>", ignoreCase = true)) return null
+    return s
+}
+
+// SSID -> 장소 라벨 매핑
 fun resolvePlaceLabelFromWifi(ssid: String?): String {
-    val s = ssid?.trim()?.lowercase() ?: return "unknown"
+    val s = sanitizeSsid(ssid)?.lowercase() ?: return "unknown"
+
     return when (s) {
         "blue" -> "lab"
-        // 필요하면 계속 추가
-        // "myhomewifi" -> "home"
+        "sk_wifigigabe54_5g" -> "home"
         // "companywifi" -> "office"
         else -> "other"
     }
