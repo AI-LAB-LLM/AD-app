@@ -12,6 +12,7 @@ import com.samsung.android.service.health.tracking.data.DataPoint
 import com.samsung.android.service.health.tracking.data.HealthTrackerType
 import com.samsung.android.service.health.tracking.data.ValueKey
 import java.util.concurrent.ConcurrentLinkedQueue
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 //Samsung Health Tracking SDK 기반 IBI -> RMSSD 계산 트래커
@@ -22,6 +23,13 @@ class HrvTracker(
 ) {
     companion object {
         private const val TAG = "HrvTracker"
+        private const val PERM_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
+        private const val TARGET_SDK_36 = 36
+
+        // outlier 필터 파라미터(보수적으로)
+        private const val IBI_MEDIAN_LO = 0.70
+        private const val IBI_MEDIAN_HI = 1.30
+        private const val MAX_DIFF_MS = 200 // 너무 큰 diff는 아티팩트로 제외
     }
 
     private val appContext = context.applicationContext
@@ -29,13 +37,11 @@ class HrvTracker(
     private var service: HealthTrackingService? = null
     private var tracker: HealthTracker? = null
 
-    // 최근 windowSeconds 동안의 IBI 샘플 (timestampMs, ibiMs)
-    private val ibiQueue = ConcurrentLinkedQueue<Pair<Long, Int>>()
+    private val ibiQueue = ConcurrentLinkedQueue<Pair<Long, Int>>() // (tsMs, ibiMs)
 
     @Volatile private var lastHrBpm: Float = -1f
     @Volatile private var lastRmssdMs: Float = -1f
-
-    // 너무 자주 콜백/브로드캐스트되는 것 방지(1초에 1번 정도)
+    @Volatile private var lastHrvN: Int = 0
     private var lastEmitAt: Long = 0L
 
     private val connectionListener = object : ConnectionListener {
@@ -64,43 +70,40 @@ class HrvTracker(
         }
 
         override fun onConnectionFailed(exception: HealthTrackerException) {
-            Log.e(TAG, "HealthTrackingService connection failed: $exception")
+            Log.e(TAG, "HealthTrackingService connection failed: $exception", exception)
         }
     }
 
     private val eventListener = object : HealthTracker.TrackerEventListener {
-
         override fun onDataReceived(data: MutableList<DataPoint>) {
-            var updated = false
+            var updatedIbi = false
 
             for (dp in data) {
-                val ts = dp.timestamp
+                val rawTs = dp.timestamp
+                val tsMs = normalizeToEpochMs(rawTs)
 
-                // HR (Int로 들어오므로 Float로 변환)
-                runCatching {
-                    val hrInt = dp.getValue(ValueKey.HeartRateSet.HEART_RATE) // Int
-                    if (hrInt in 30..220) {
-                        lastHrBpm = hrInt.toFloat()
-                    }
-                }
+                val hrStatus = runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE_STATUS) }.getOrNull()
+                val hrInt = runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE) }.getOrNull()
 
-                // IBI 리스트 + 상태 리스트(정상=0)
+                if (hrInt != null && hrInt in 30..220) lastHrBpm = hrInt.toFloat()
+
                 val ibiList = runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_LIST) }.getOrNull()
                 val statusList = runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_STATUS_LIST) }.getOrNull()
 
-                if (!ibiList.isNullOrEmpty()) {
-                    updated = true
-                    addIbiSamples(ts, ibiList, statusList)
+                val nowMs = System.currentTimeMillis()
+                Log.d(TAG, "HR dp: status=$hrStatus hr=$hrInt ibiSize=${ibiList?.size ?: 0} rawTs=$rawTs tsMs=$tsMs nowMs=$nowMs diffMs=${tsMs - nowMs}")
+
+                if (hrStatus == 1 && !ibiList.isNullOrEmpty()) {
+                    updatedIbi = true
+                    addIbiSamples(tsMs, ibiList, statusList)
                 }
             }
 
-            // IBI가 갱신된 경우에만 RMSSD 계산/콜백
-            if (updated) {
-                lastRmssdMs = computeRmssdMs()
+            if (updatedIbi) {
+                val (rmssd, n) = computeRmssdMsAndN()
+                lastRmssdMs = rmssd
+                lastHrvN = n
                 emitIfNeeded()
-            } else {
-                // HR만 갱신된 경우에도 가끔 업데이트하고 싶으면 아래 주석 해제
-                // emitIfNeeded()
             }
         }
 
@@ -114,19 +117,24 @@ class HrvTracker(
     }
 
     fun start() {
-        // BODY_SENSORS 권한이 없으면 삼성 트래킹 자체가 안 뜨는 경우가 많음
-        val granted = appContext.checkSelfPermission(Manifest.permission.BODY_SENSORS) ==
-                PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            Log.w(TAG, "BODY_SENSORS not granted -> HRV disabled")
+        val hasBodySensors =
+            appContext.checkSelfPermission(Manifest.permission.BODY_SENSORS) == PackageManager.PERMISSION_GRANTED
+
+        val targetSdk = appContext.applicationInfo.targetSdkVersion
+        val hasReadHeartRate =
+            (targetSdk >= TARGET_SDK_36) &&
+                    (appContext.checkSelfPermission(PERM_READ_HEART_RATE) == PackageManager.PERMISSION_GRANTED)
+
+        Log.i(TAG, "start(): targetSdk=$targetSdk bodySensors=$hasBodySensors readHeartRate=$hasReadHeartRate")
+
+        if (!hasBodySensors && !hasReadHeartRate) {
+            Log.w(TAG, "No HR permission granted -> HRV disabled")
             onUpdate(-1f, -1f, 0)
             return
         }
 
         try {
-            service = HealthTrackingService(connectionListener, appContext).also {
-                it.connectService()
-            }
+            service = HealthTrackingService(connectionListener, appContext).also { it.connectService() }
             Log.i(TAG, "connectService() called")
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to start HealthTrackingService", t)
@@ -144,58 +152,80 @@ class HrvTracker(
         ibiQueue.clear()
         lastRmssdMs = -1f
         lastHrBpm = -1f
+        lastHrvN = 0
     }
 
     fun getLastRmssdMs(): Float = lastRmssdMs
     fun getLastHrBpm(): Float = lastHrBpm
+    fun getLastHrvN(): Int = lastHrvN
 
-
-    // 내부 로직
-    private fun addIbiSamples(timestampMs: Long, ibiList: List<Int>, statusList: List<Int>?) {
-        for (i in ibiList.indices) {
-            val ibi = ibiList[i]               // ms
-            val status = statusList?.getOrNull(i) ?: 0
-
-            // 정상(status==0) + 현실 범위만
-            if (status != 0) continue
-            if (ibi !in 300..2000) continue
-
-            ibiQueue.add(timestampMs to ibi)
-        }
-        trimOldIbi(timestampMs)
+    private fun normalizeToEpochMs(raw: Long): Long {
+        val nowMs = System.currentTimeMillis()
+        data class Cand(val ms: Long)
+        val cands = listOf(
+            Cand(raw),
+            Cand(raw / 1_000L),
+            Cand(raw / 1_000_000L),
+            Cand(raw * 1_000L)
+        ).filter { it.ms > 0 }
+        return cands.minBy { abs(it.ms - nowMs) }.ms
     }
 
-    private fun trimOldIbi(now: Long) {
-        val cutoff = now - windowSeconds * 1000L
+    private fun addIbiSamples(timestampMs: Long, ibiList: List<Int>, statusList: List<Int>?) {
+        val totalIbiMs = ibiList.sum().toLong()
+        var t = timestampMs - totalIbiMs
+        if (t < 0L) t = 0L
+
+        var added = 0
+        for (i in ibiList.indices) {
+            val ibi = ibiList[i]
+            val status = statusList?.getOrNull(i) ?: 0
+            if (status != 0) continue
+            if (ibi !in 300..2000) continue
+            t += ibi.toLong()
+            ibiQueue.add(t to ibi)
+            added++
+        }
+
+        trimOldIbi(timestampMs)
+        Log.d(TAG, "addIbiSamples: added=$added queueSize=${ibiQueue.size}")
+    }
+
+    private fun trimOldIbi(nowMs: Long) {
+        val cutoff = nowMs - windowSeconds * 1000L
         while (true) {
             val head = ibiQueue.peek() ?: break
             if (head.first < cutoff) ibiQueue.poll() else break
         }
     }
 
-    private fun computeRmssdMs(): Float {
-        val samples = ibiQueue.toList()
-            .sortedBy { it.first }
-            .map { it.second }
+    private fun computeRmssdMsAndN(): Pair<Float, Int> {
+        val ibis = ibiQueue.toList().sortedBy { it.first }.map { it.second }
+        if (ibis.size < 2) return -1f to 0
 
-        if (samples.size < 3) return -1f
+        // 중앙값 기반 IBI outlier 제거
+        val sorted = ibis.sorted()
+        val med = sorted[sorted.size / 2]
+        val lo = (med * IBI_MEDIAN_LO).toInt().coerceAtLeast(300)
+        val hi = (med * IBI_MEDIAN_HI).toInt().coerceAtMost(2000)
+        val filtered = ibis.filter { it in lo..hi }
+        if (filtered.size < 2) return -1f to filtered.size
+
+        // diff가 너무 큰 구간 제거
+        val diffs = filtered.zipWithNext { a, b -> abs(b - a) }.filter { it <= MAX_DIFF_MS }
+        if (diffs.isEmpty()) return -1f to filtered.size
 
         var sumSq = 0.0
-        var cnt = 0
-        for (i in 1 until samples.size) {
-            val diff = (samples[i] - samples[i - 1]).toDouble()
-            sumSq += diff * diff
-            cnt++
-        }
-        return if (cnt > 0) sqrt(sumSq / cnt).toFloat() else -1f
+        for (d in diffs) sumSq += (d.toDouble() * d.toDouble())
+        val rmssd = sqrt(sumSq / diffs.size).toFloat()
+
+        return rmssd to filtered.size
     }
 
     private fun emitIfNeeded() {
         val now = System.currentTimeMillis()
-        if (now - lastEmitAt < 1000L) return // 1초에 1번 정도만
+        if (now - lastEmitAt < 1000L) return
         lastEmitAt = now
-
-        val count = ibiQueue.size
-        onUpdate(lastRmssdMs, lastHrBpm, count)
+        onUpdate(lastRmssdMs, lastHrBpm, lastHrvN)
     }
 }

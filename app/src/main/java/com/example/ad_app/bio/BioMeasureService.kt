@@ -1,15 +1,22 @@
 package com.example.ad_app.bio
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.health.services.client.HealthServices
 import androidx.health.services.client.PassiveListenerCallback
 import androidx.health.services.client.PassiveMonitoringClient
 import androidx.health.services.client.data.DataPointContainer
 import androidx.health.services.client.data.DataType
 import androidx.health.services.client.data.PassiveListenerConfig
+import com.example.ad_app.DataLogger
+import com.example.ad_app.R
 import java.util.concurrent.ConcurrentLinkedQueue
 
 class BioMeasureService : Service() {
@@ -41,34 +48,40 @@ class BioMeasureService : Service() {
     @Volatile private var lastStepsDelta: Long = 0L
     @Volatile private var lastStepsPerMin: Float = 0f
 
-    // 최근 60초 steps delta 모아서 steps/min 추정
-    private val stepEvents = ConcurrentLinkedQueue<Pair<Long, Long>>() // (timestampMs, delta)
+    private val stepEvents = ConcurrentLinkedQueue<Pair<Long, Long>>() // (tsMs, delta)
 
-
-    // Samsung HRV (IBI -> RMSSD): HrvTracker 사용
+    // HRV tracker
     private var hrvTracker: HrvTracker? = null
     @Volatile private var lastHrvRmssd: Float = -1f
 
-    // 브로드캐스트 과다 방지(원하면 조절)
+    // HRV 샘플 수(유효 IBI 개수) 저장
+    @Volatile private var lastHrvN: Int = -1
+
+    // UI broadcast throttle (장기수집용으로 조금 느리게)
     private var lastBroadcastAt: Long = 0L
+    private val UI_BROADCAST_INTERVAL_MS = 2000L
+
+    // logger register guard
+    private var logRegistered = false
+
+    // foreground noti
+    private val CHANNEL_ID = "bio_measure_channel"
+    private val NOTI_ID = 1002
 
     private val passiveCallback = object : PassiveListenerCallback {
         override fun onNewDataPointsReceived(dataPoints: DataPointContainer) {
 
-            // HR
             dataPoints.getData(DataType.HEART_RATE_BPM).lastOrNull()?.let { dp ->
                 lastHr = dp.value.toFloat()
             }
 
-            // 오늘 누적 걸음수
             dataPoints.getData(DataType.STEPS_DAILY).lastOrNull()?.let { dp ->
                 lastStepsDaily = dp.value
             }
 
-            // 델타 걸음수
             val deltas = dataPoints.getData(DataType.STEPS)
             if (deltas.isNotEmpty()) {
-                val sumDelta = deltas.sumOf { it.value } // Long
+                val sumDelta = deltas.sumOf { it.value }
                 lastStepsDelta = sumDelta
 
                 val now = System.currentTimeMillis()
@@ -77,23 +90,39 @@ class BioMeasureService : Service() {
                 lastStepsPerMin = computeStepsPerMin()
             }
 
+            DataLogger.updateBio(
+                hrBpm = lastHr,
+                hrvRmssd = lastHrvRmssd,
+                hrvSampleCount = lastHrvN,
+                stepsDaily = lastStepsDaily,
+                stepsDelta = lastStepsDelta,
+                stepsPerMin = lastStepsPerMin
+            )
+
             broadcastBioUpdateThrottled()
         }
     }
 
-
     override fun onCreate() {
         super.onCreate()
         passiveClient = HealthServices.getClient(this).passiveMonitoringClient
+        createNotificationChannel()
 
-        // HRV 트래커 연결
         hrvTracker = HrvTracker(this) { rmssdMs, hrBpm, sampleCount ->
             lastHrvRmssd = rmssdMs
-            // 삼성 HR이 더 빨리/안정적으로 올 때 HR 보정(옵션)
+            lastHrvN = sampleCount // HRV 샘플 수 갱신
             if (hrBpm >= 0) lastHr = hrBpm
 
-            Log.d(TAG, "HRV rmssd=$rmssdMs ms, hr=$hrBpm bpm, n=$sampleCount")
+            DataLogger.updateBio(
+                hrBpm = lastHr,
+                hrvRmssd = lastHrvRmssd,
+                hrvSampleCount = lastHrvN,
+                stepsDaily = lastStepsDaily,
+                stepsDelta = lastStepsDelta,
+                stepsPerMin = lastStepsPerMin
+            )
 
+            Log.d(TAG, "HRV rmssd=$rmssdMs ms, hr=$hrBpm bpm, n=$sampleCount")
             broadcastBioUpdateThrottled()
         }
 
@@ -116,6 +145,13 @@ class BioMeasureService : Service() {
         }
         Log.i(TAG, "startBio()")
 
+        startForeground(NOTI_ID, buildNotification())
+
+        if (!logRegistered) {
+            DataLogger.register(this)
+            logRegistered = true
+        }
+
         startPassiveMonitoring()
         hrvTracker?.start()
 
@@ -123,15 +159,27 @@ class BioMeasureService : Service() {
     }
 
     private fun stopBioAndSelf() {
+        if (!isRunning) {
+            if (logRegistered) {
+                DataLogger.unregister()
+                logRegistered = false
+            }
+            stopSelf()
+            return
+        }
+
         Log.i(TAG, "stopBioAndSelf()")
 
-        // HRV 중단
         hrvTracker?.stop()
-
-        // Passive 중단
         stopPassiveMonitoring()
 
+        if (logRegistered) {
+            DataLogger.unregister()
+            logRegistered = false
+        }
+
         isRunning = false
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
@@ -140,17 +188,13 @@ class BioMeasureService : Service() {
         super.onDestroy()
     }
 
-
-    // Passive monitoring
     private fun startPassiveMonitoring() {
         val config = PassiveListenerConfig.builder()
-            .setDataTypes(
-                setOf(
-                    DataType.HEART_RATE_BPM,
-                    DataType.STEPS_DAILY,
-                    DataType.STEPS
-                )
-            )
+            .setDataTypes(setOf(
+                DataType.HEART_RATE_BPM,
+                DataType.STEPS_DAILY,
+                DataType.STEPS
+            ))
             .build()
 
         runCatching {
@@ -170,8 +214,6 @@ class BioMeasureService : Service() {
         }
     }
 
-
-    // Steps helpers
     private fun trimOldSteps(now: Long) {
         val cutoff = now - 60_000L
         while (true) {
@@ -181,22 +223,20 @@ class BioMeasureService : Service() {
     }
 
     private fun computeStepsPerMin(): Float {
-        val sum = stepEvents.sumOf { it.second } // Long
+        val sum = stepEvents.sumOf { it.second }
         return sum.toFloat()
     }
 
-
-    // Broadcast
     private fun broadcastBioUpdateThrottled() {
         val now = System.currentTimeMillis()
-        if (now - lastBroadcastAt < 500L) return // 0.5초에 1번 정도만
+        if (now - lastBroadcastAt < UI_BROADCAST_INTERVAL_MS) return
         lastBroadcastAt = now
         broadcastBioUpdate()
     }
 
     private fun broadcastBioUpdate() {
         val i = Intent(ACTION_UPDATE).apply {
-            setPackage(packageName) // 앱 내부로만
+            setPackage(packageName)
             putExtra(EXTRA_HR_BPM, lastHr)
             putExtra(EXTRA_STEPS_DAILY, lastStepsDaily)
             putExtra(EXTRA_STEPS_DELTA, lastStepsDelta)
@@ -204,5 +244,27 @@ class BioMeasureService : Service() {
             putExtra(EXTRA_HRV_RMSSD, lastHrvRmssd)
         }
         sendBroadcast(i)
+    }
+
+    // --- Notification ---
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+            val ch = NotificationChannel(
+                CHANNEL_ID,
+                "Bio Measurement",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            nm.createNotificationChannel(ch)
+        }
+    }
+
+    private fun buildNotification(): Notification {
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("생체 측정 중")
+            .setContentText("HR/HRV/걸음 수 수집 및 로컬 저장")
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setOngoing(true)
+            .build()
     }
 }
