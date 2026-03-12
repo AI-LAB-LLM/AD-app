@@ -115,11 +115,16 @@ object DataLogger {
     }
 
     fun updateBioHrv(hrvRmssd: Float, hrvSampleCount: Int) {
-        if (hrvRmssd < 0) return
+        if (hrvRmssd < 0) {
+            Log.d(TAG, "updateBioHrv SKIP invalid rmssd=$hrvRmssd n=$hrvSampleCount at=${System.currentTimeMillis()}")
+            return
+        }
         val now = System.currentTimeMillis()
         bioHrv = hrvRmssd
         bioHrvN = hrvSampleCount.takeIf { it >= 0 }
         bioHrvUpdatedAt = now
+
+        Log.d(TAG, "updateBioHrv SAVED rmssd=$bioHrv n=$bioHrvN updatedAt=$bioHrvUpdatedAt")
     }
 
     fun updateBioSteps(
@@ -191,6 +196,8 @@ object DataLogger {
 
                 if (basicOk) 1 else 0
             }
+
+            Log.d(TAG, "writeTick ts=$now hrvOut=$hrvOut hrvNOut=$hrvNOut hrvAge=$hrvAge hrvValid=$hrvValidInt")
 
             val line = buildLine(
                 tsMs = now,

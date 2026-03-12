@@ -26,7 +26,7 @@ class HrvTracker(
         private const val PERM_READ_HEART_RATE = "android.permission.health.READ_HEART_RATE"
         private const val TARGET_SDK_36 = 36
 
-        // outlier 필터 파라미터(보수적으로)
+        // outlier 필터 파라미터
         private const val IBI_MEDIAN_LO = 0.70
         private const val IBI_MEDIAN_HI = 1.30
         private const val MAX_DIFF_MS = 200 // 너무 큰 diff는 아티팩트로 제외
@@ -43,6 +43,17 @@ class HrvTracker(
     @Volatile private var lastRmssdMs: Float = -1f
     @Volatile private var lastHrvN: Int = 0
     private var lastEmitAt: Long = 0L
+
+    private data class IbiUpdateResult(
+        val added: Int,
+        val trimmed: Int,
+        val rejectedByStatus: Int,
+        val rejectedByRange: Int,
+        val queueSize: Int
+    ) {
+        val queueChanged: Boolean
+            get() = added > 0 || trimmed > 0
+    }
 
     private val connectionListener = object : ConnectionListener {
         override fun onConnectionSuccess() {
@@ -76,33 +87,55 @@ class HrvTracker(
 
     private val eventListener = object : HealthTracker.TrackerEventListener {
         override fun onDataReceived(data: MutableList<DataPoint>) {
-            var updatedIbi = false
+            var queueChanged = false
+
+            Log.d(TAG, "onDataReceived size=${data.size} at=${System.currentTimeMillis()}")
 
             for (dp in data) {
                 val rawTs = dp.timestamp
                 val tsMs = normalizeToEpochMs(rawTs)
 
-                val hrStatus = runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE_STATUS) }.getOrNull()
-                val hrInt = runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE) }.getOrNull()
+                val hrStatus =
+                    runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE_STATUS) }.getOrNull()
+                val hrInt =
+                    runCatching { dp.getValue(ValueKey.HeartRateSet.HEART_RATE) }.getOrNull()
 
-                if (hrInt != null && hrInt in 30..220) lastHrBpm = hrInt.toFloat()
+                if (hrInt != null && hrInt in 30..220) {
+                    lastHrBpm = hrInt.toFloat()
+                }
 
-                val ibiList = runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_LIST) }.getOrNull()
-                val statusList = runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_STATUS_LIST) }.getOrNull()
+                val ibiList =
+                    runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_LIST) }.getOrNull()
+                val statusList =
+                    runCatching { dp.getValue(ValueKey.HeartRateSet.IBI_STATUS_LIST) }.getOrNull()
 
-                val nowMs = System.currentTimeMillis()
-                Log.d(TAG, "HR dp: status=$hrStatus hr=$hrInt ibiSize=${ibiList?.size ?: 0} rawTs=$rawTs tsMs=$tsMs nowMs=$nowMs diffMs=${tsMs - nowMs}")
+                Log.d(
+                    TAG,
+                    "HR dp: status=$hrStatus hr=$hrInt ibiSize=${ibiList?.size ?: 0} tsMs=$tsMs"
+                )
 
                 if (hrStatus == 1 && !ibiList.isNullOrEmpty()) {
-                    updatedIbi = true
-                    addIbiSamples(tsMs, ibiList, statusList)
+                    val result = addIbiSamples(tsMs, ibiList, statusList)
+                    if (result.queueChanged) {
+                        queueChanged = true
+                    }
+                } else if (hrStatus == 1 && ibiList.isNullOrEmpty()) {
+                    val trimmed = trimOldIbi(tsMs)
+                    if (trimmed > 0) {
+                        queueChanged = true
+                        Log.d(TAG, "trimOnly: trimmed=$trimmed queueSize=${ibiQueue.size}")
+                    }
                 }
             }
 
-            if (updatedIbi) {
+            Log.d(TAG, "onDataReceived queueChanged=$queueChanged queueSize=${ibiQueue.size}")
+
+            if (queueChanged) {
                 val (rmssd, n) = computeRmssdMsAndN()
                 lastRmssdMs = rmssd
                 lastHrvN = n
+
+                Log.d(TAG, "compute result rmssd=$rmssd n=$n queueSize=${ibiQueue.size}")
                 emitIfNeeded()
             }
         }
@@ -125,7 +158,10 @@ class HrvTracker(
             (targetSdk >= TARGET_SDK_36) &&
                     (appContext.checkSelfPermission(PERM_READ_HEART_RATE) == PackageManager.PERMISSION_GRANTED)
 
-        Log.i(TAG, "start(): targetSdk=$targetSdk bodySensors=$hasBodySensors readHeartRate=$hasReadHeartRate")
+        Log.i(
+            TAG,
+            "start(): targetSdk=$targetSdk bodySensors=$hasBodySensors readHeartRate=$hasReadHeartRate"
+        )
 
         if (!hasBodySensors && !hasReadHeartRate) {
             Log.w(TAG, "No HR permission granted -> HRV disabled")
@@ -134,7 +170,9 @@ class HrvTracker(
         }
 
         try {
-            service = HealthTrackingService(connectionListener, appContext).also { it.connectService() }
+            service = HealthTrackingService(connectionListener, appContext).also {
+                it.connectService()
+            }
             Log.i(TAG, "connectService() called")
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to start HealthTrackingService", t)
@@ -143,10 +181,16 @@ class HrvTracker(
     }
 
     fun stop() {
-        try { tracker?.unsetEventListener() } catch (_: Exception) {}
+        try {
+            tracker?.unsetEventListener()
+        } catch (_: Exception) {
+        }
         tracker = null
 
-        try { service?.disconnectService() } catch (_: Exception) {}
+        try {
+            service?.disconnectService()
+        } catch (_: Exception) {
+        }
         service = null
 
         ibiQueue.clear()
@@ -162,63 +206,116 @@ class HrvTracker(
     private fun normalizeToEpochMs(raw: Long): Long {
         val nowMs = System.currentTimeMillis()
         data class Cand(val ms: Long)
+
         val cands = listOf(
             Cand(raw),
             Cand(raw / 1_000L),
             Cand(raw / 1_000_000L),
             Cand(raw * 1_000L)
         ).filter { it.ms > 0 }
+
         return cands.minBy { abs(it.ms - nowMs) }.ms
     }
 
-    private fun addIbiSamples(timestampMs: Long, ibiList: List<Int>, statusList: List<Int>?) {
+    private fun addIbiSamples(
+        timestampMs: Long,
+        ibiList: List<Int>,
+        statusList: List<Int>?
+    ): IbiUpdateResult {
         val totalIbiMs = ibiList.sum().toLong()
         var t = timestampMs - totalIbiMs
         if (t < 0L) t = 0L
 
         var added = 0
+        var rejectedByStatus = 0
+        var rejectedByRange = 0
+
         for (i in ibiList.indices) {
             val ibi = ibiList[i]
             val status = statusList?.getOrNull(i) ?: 0
-            if (status != 0) continue
-            if (ibi !in 300..2000) continue
+
+            if (status != 0) {
+                rejectedByStatus++
+                continue
+            }
+
+            if (ibi !in 300..2000) {
+                rejectedByRange++
+                continue
+            }
+
             t += ibi.toLong()
             ibiQueue.add(t to ibi)
             added++
         }
 
-        trimOldIbi(timestampMs)
-        Log.d(TAG, "addIbiSamples: added=$added queueSize=${ibiQueue.size}")
+        val trimmed = trimOldIbi(timestampMs)
+
+        Log.d(
+            TAG,
+            "addIbiSamples: ibiList=$ibiList statusList=$statusList " +
+                    "added=$added trimmed=$trimmed rejectedByStatus=$rejectedByStatus " +
+                    "rejectedByRange=$rejectedByRange queueSize=${ibiQueue.size}"
+        )
+
+        return IbiUpdateResult(
+            added = added,
+            trimmed = trimmed,
+            rejectedByStatus = rejectedByStatus,
+            rejectedByRange = rejectedByRange,
+            queueSize = ibiQueue.size
+        )
     }
 
-    private fun trimOldIbi(nowMs: Long) {
+    private fun trimOldIbi(nowMs: Long): Int {
         val cutoff = nowMs - windowSeconds * 1000L
+        var trimmed = 0
+
         while (true) {
             val head = ibiQueue.peek() ?: break
-            if (head.first < cutoff) ibiQueue.poll() else break
+            if (head.first < cutoff) {
+                ibiQueue.poll()
+                trimmed++
+            } else {
+                break
+            }
         }
+        return trimmed
     }
 
     private fun computeRmssdMsAndN(): Pair<Float, Int> {
         val ibis = ibiQueue.toList().sortedBy { it.first }.map { it.second }
-        if (ibis.size < 2) return -1f to 0
 
-        // 중앙값 기반 IBI outlier 제거
+        if (ibis.size < 2) {
+            Log.d(TAG, "computeRmssdMsAndN fail: ibis.size=${ibis.size}")
+            return -1f to 0
+        }
+
         val sorted = ibis.sorted()
         val med = sorted[sorted.size / 2]
         val lo = (med * IBI_MEDIAN_LO).toInt().coerceAtLeast(300)
         val hi = (med * IBI_MEDIAN_HI).toInt().coerceAtMost(2000)
         val filtered = ibis.filter { it in lo..hi }
-        if (filtered.size < 2) return -1f to filtered.size
 
-        // diff가 너무 큰 구간 제거
+        if (filtered.size < 2) {
+            Log.d(TAG, "computeRmssdMsAndN fail: filtered.size=${filtered.size} med=$med lo=$lo hi=$hi")
+            return -1f to filtered.size
+        }
+
         val diffs = filtered.zipWithNext { a, b -> abs(b - a) }.filter { it <= MAX_DIFF_MS }
-        if (diffs.isEmpty()) return -1f to filtered.size
+
+        if (diffs.isEmpty()) {
+            Log.d(TAG, "computeRmssdMsAndN fail: diffs empty filtered.size=${filtered.size}")
+            return -1f to filtered.size
+        }
 
         var sumSq = 0.0
-        for (d in diffs) sumSq += (d.toDouble() * d.toDouble())
+        for (d in diffs) {
+            sumSq += d.toDouble() * d.toDouble()
+        }
         val rmssd = sqrt(sumSq / diffs.size).toFloat()
 
+        Log.d(TAG, "computeRmssdMsAndN ok: rmssd=$rmssd ibis=${ibis.size} filtered=${filtered.size} diffs=${diffs.size}")
         return rmssd to filtered.size
     }
 

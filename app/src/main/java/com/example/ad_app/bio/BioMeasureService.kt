@@ -113,6 +113,7 @@ class BioMeasureService : Service() {
         createNotificationChannel()
 
         hrvTracker = HrvTracker(this) { rmssdMs, hrBpm, sampleCount ->
+            Log.d(TAG, "HRV CALLBACK start rmssd=$rmssdMs hr=$hrBpm n=$sampleCount at=${System.currentTimeMillis()}")
             lastHrvRmssd = rmssdMs
             lastHrvN = sampleCount
 
@@ -121,13 +122,15 @@ class BioMeasureService : Service() {
                 DataLogger.updateBioHr(lastHr)
             }
 
-            // HRV는 "실제로 새로 계산됐을 때만" 갱신
+            // 이 로그를 넣으면 "저장 시도"가 실제로 일어났는지 보임
+            Log.d(TAG, "HRV CALLBACK before DataLogger.updateBioHrv rmssd=$lastHrvRmssd n=$lastHrvN")
+
             DataLogger.updateBioHrv(
                 hrvRmssd = lastHrvRmssd,
                 hrvSampleCount = lastHrvN
             )
 
-            Log.d(TAG, "HRV rmssd=$rmssdMs ms, hr=$hrBpm bpm, n=$sampleCount")
+            Log.d(TAG, "HRV CALLBACK end rmssd=$rmssdMs ms, hr=$hrBpm bpm, n=$sampleCount")
             broadcastBioUpdateThrottled()
         }
 
