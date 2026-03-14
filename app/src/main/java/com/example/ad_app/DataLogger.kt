@@ -9,6 +9,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -66,10 +67,13 @@ object DataLogger {
     @Volatile private var bioHrvN: Int? = null
     @Volatile private var bioHrvUpdatedAt: Long = 0L
 
+    // steps_daily 는 누적값이라 마지막 값 유지
     @Volatile private var bioStepsDaily: Long? = null
-    @Volatile private var bioStepsDelta: Long? = null
-    @Volatile private var bioStepsPerMin: Float? = null
-    @Volatile private var bioStepsUpdatedAt: Long = 0L
+    @Volatile private var bioStepsDailyUpdatedAt: Long = 0L
+
+    // step event queue: 최근 60초 step 계산용
+    private val bioStepEvents = ConcurrentLinkedQueue<Pair<Long, Long>>() // (tsMs, delta)
+    @Volatile private var bioStepEventUpdatedAt: Long = 0L
 
     fun register(context: Context) {
         val n = refCount.incrementAndGet()
@@ -92,6 +96,7 @@ object DataLogger {
                 try { scheduler?.shutdownNow() } catch (_: Exception) {}
                 scheduler = null
                 closeLocked()
+                clearStepQueueLocked()
             }
         }
     }
@@ -127,17 +132,20 @@ object DataLogger {
         Log.d(TAG, "updateBioHrv SAVED rmssd=$bioHrv n=$bioHrvN updatedAt=$bioHrvUpdatedAt")
     }
 
-    fun updateBioSteps(
-        stepsDaily: Long,
-        stepsDelta: Long,
-        stepsPerMin: Float
-    ) {
-        val now = System.currentTimeMillis()
+    fun updateBioStepsDaily(stepsDaily: Long) {
+        if (stepsDaily < 0) return
+        bioStepsDaily = stepsDaily
+        bioStepsDailyUpdatedAt = System.currentTimeMillis()
+    }
 
-        if (stepsDaily >= 0) bioStepsDaily = stepsDaily
-        bioStepsDelta = stepsDelta
-        bioStepsPerMin = stepsPerMin
-        bioStepsUpdatedAt = now
+    fun appendStepDelta(stepsDelta: Long, eventTimeMs: Long = System.currentTimeMillis()) {
+        if (stepsDelta <= 0) return
+        synchronized(lock) {
+            bioStepEvents.add(eventTimeMs to stepsDelta)
+            trimOldStepEventsLocked(eventTimeMs)
+            bioStepEventUpdatedAt = eventTimeMs
+        }
+        Log.d(TAG, "appendStepDelta delta=$stepsDelta at=$eventTimeMs")
     }
 
     // ---------- 내부 스케줄 ----------
@@ -169,7 +177,10 @@ object DataLogger {
             val envAge = envUpdatedAt.takeIf { it > 0 }?.let { now - it }
             val hrAge = bioHrUpdatedAt.takeIf { it > 0 }?.let { now - it }
             val hrvAge = bioHrvUpdatedAt.takeIf { it > 0 }?.let { now - it }
-            val stepsAge = bioStepsUpdatedAt.takeIf { it > 0 }?.let { now - it }
+
+            val stepsDailyAge = bioStepsDailyUpdatedAt.takeIf { it > 0 }?.let { now - it }
+            val stepEventAge = bioStepEventUpdatedAt.takeIf { it > 0 }?.let { now - it }
+            val stepsAge = stepEventAge ?: stepsDailyAge
 
             // Env는 stale이면 비움
             val luxOut = if (envAge != null && envAge <= STALE_ENV_MS) envLux else null
@@ -177,13 +188,21 @@ object DataLogger {
             val ssidOut = if (envAge != null && envAge <= STALE_ENV_MS) envSsid else null
             val placeOut = if (envAge != null && envAge <= STALE_ENV_MS) envPlace else null
 
-            // HR / Steps / HRV는 마지막 값 유지
-            val hrOut = bioHr
-            val hrvOut = bioHrv
-            val hrvNOut = bioHrvN
+            // HR / HRV는 stale이면 비움
+            val hrFresh = hrAge != null && hrAge <= STALE_HR_MS
+            val hrOut = if (hrFresh) bioHr else null
+
+            val hrvFresh = hrvAge != null && hrvAge <= STALE_HRV_MS
+            val hrvOut = if (hrvFresh) bioHrv else null
+            val hrvNOut = if (hrvFresh) bioHrvN else null
+
+            // steps는 writeTick 시점마다 재계산
+            trimOldStepEventsLocked(now)
+            val stepsDeltaOut = sumStepEventsSinceLocked(now, LOG_INTERVAL_MS)
+            val stepsPerMinOut = sumStepEventsSinceLocked(now, 60_000L).toFloat()
+
+            // steps_daily는 누적값이라 마지막 값 유지
             val stepsDailyOut = bioStepsDaily
-            val stepsDeltaOut = bioStepsDelta
-            val stepsPerMinOut = bioStepsPerMin
 
             val hrvValidInt = run {
                 val rmssd = hrvOut
@@ -197,7 +216,10 @@ object DataLogger {
                 if (basicOk) 1 else 0
             }
 
-            Log.d(TAG, "writeTick ts=$now hrvOut=$hrvOut hrvNOut=$hrvNOut hrvAge=$hrvAge hrvValid=$hrvValidInt")
+            Log.d(
+                TAG,
+                "writeTick ts=$now hrOut=$hrOut hrAge=$hrAge hrvOut=$hrvOut hrvNOut=$hrvNOut hrvAge=$hrvAge stepsDeltaOut=$stepsDeltaOut stepsPerMinOut=$stepsPerMinOut"
+            )
 
             val line = buildLine(
                 tsMs = now,
@@ -281,6 +303,31 @@ object DataLogger {
         writer?.flush()
         lastFlushAt = System.currentTimeMillis()
         wroteHeader = true
+    }
+
+    private fun trimOldStepEventsLocked(now: Long) {
+        val cutoff = now - 60_000L
+        while (true) {
+            val head = bioStepEvents.peek() ?: break
+            if (head.first < cutoff) {
+                bioStepEvents.poll()
+            } else {
+                break
+            }
+        }
+    }
+
+    private fun sumStepEventsSinceLocked(now: Long, windowMs: Long): Long {
+        val cutoff = now - windowMs
+        return bioStepEvents
+            .asSequence()
+            .filter { it.first >= cutoff }
+            .sumOf { it.second }
+    }
+
+    private fun clearStepQueueLocked() {
+        bioStepEvents.clear()
+        bioStepEventUpdatedAt = 0L
     }
 
     private fun buildLine(

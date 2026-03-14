@@ -47,7 +47,9 @@ class BioMeasureService : Service() {
     @Volatile private var lastStepsDaily: Long = -1L
     @Volatile private var lastStepsDelta: Long = 0L
     @Volatile private var lastStepsPerMin: Float = 0f
+    @Volatile private var lastStepEventAt: Long = 0L
 
+    // UI 표시용 최근 60초 step queue
     private val stepEvents = ConcurrentLinkedQueue<Pair<Long, Long>>() // (tsMs, delta)
 
     private var hrvTracker: HrvTracker? = null
@@ -65,6 +67,7 @@ class BioMeasureService : Service() {
     private val passiveCallback = object : PassiveListenerCallback {
         override fun onNewDataPointsReceived(dataPoints: DataPointContainer) {
             var changed = false
+            val now = System.currentTimeMillis()
 
             // HR
             dataPoints.getData(DataType.HEART_RATE_BPM).lastOrNull()?.let { dp ->
@@ -77,28 +80,38 @@ class BioMeasureService : Service() {
             var gotStepsDaily = false
             dataPoints.getData(DataType.STEPS_DAILY).lastOrNull()?.let { dp ->
                 lastStepsDaily = dp.value
+                DataLogger.updateBioStepsDaily(lastStepsDaily)
                 gotStepsDaily = true
             }
 
-            // Steps delta
+            // Steps delta events
             val deltas = dataPoints.getData(DataType.STEPS)
             if (deltas.isNotEmpty()) {
                 val sumDelta = deltas.sumOf { it.value }
                 lastStepsDelta = sumDelta
+                lastStepEventAt = now
 
-                val now = System.currentTimeMillis()
+                // UI용 queue
                 stepEvents.add(now to sumDelta)
                 trimOldSteps(now)
-                lastStepsPerMin = computeStepsPerMin()
+                lastStepsPerMin = computeStepsPerMin(now)
+
+                // CSV 로거용 raw step event 추가
+                DataLogger.appendStepDelta(sumDelta, now)
+
+                changed = true
+            } else {
+                // step 이벤트가 없으면 이번 callback 기준 delta는 0
+                lastStepsDelta = 0L
+                trimOldSteps(now)
+                lastStepsPerMin = computeStepsPerMin(now)
             }
 
             if (gotStepsDaily || deltas.isNotEmpty()) {
-                DataLogger.updateBioSteps(
-                    stepsDaily = lastStepsDaily,
-                    stepsDelta = lastStepsDelta,
-                    stepsPerMin = lastStepsPerMin
+                Log.d(
+                    TAG,
+                    "steps update daily=$lastStepsDaily delta=$lastStepsDelta spm=$lastStepsPerMin"
                 )
-                changed = true
             }
 
             if (changed) {
@@ -113,7 +126,11 @@ class BioMeasureService : Service() {
         createNotificationChannel()
 
         hrvTracker = HrvTracker(this) { rmssdMs, hrBpm, sampleCount ->
-            Log.d(TAG, "HRV CALLBACK start rmssd=$rmssdMs hr=$hrBpm n=$sampleCount at=${System.currentTimeMillis()}")
+            Log.d(
+                TAG,
+                "HRV CALLBACK start rmssd=$rmssdMs hr=$hrBpm n=$sampleCount at=${System.currentTimeMillis()}"
+            )
+
             lastHrvRmssd = rmssdMs
             lastHrvN = sampleCount
 
@@ -122,7 +139,6 @@ class BioMeasureService : Service() {
                 DataLogger.updateBioHr(lastHr)
             }
 
-            // 이 로그를 넣으면 "저장 시도"가 실제로 일어났는지 보임
             Log.d(TAG, "HRV CALLBACK before DataLogger.updateBioHrv rmssd=$lastHrvRmssd n=$lastHrvN")
 
             DataLogger.updateBioHrv(
@@ -228,13 +244,31 @@ class BioMeasureService : Service() {
         val cutoff = now - 60_000L
         while (true) {
             val head = stepEvents.peek() ?: break
-            if (head.first < cutoff) stepEvents.poll() else break
+            if (head.first < cutoff) {
+                stepEvents.poll()
+            } else {
+                break
+            }
         }
     }
 
-    private fun computeStepsPerMin(): Float {
-        val sum = stepEvents.sumOf { it.second }
+    private fun computeStepsPerMin(now: Long): Float {
+        trimOldSteps(now)
+        val cutoff = now - 60_000L
+        val sum = stepEvents
+            .asSequence()
+            .filter { it.first >= cutoff }
+            .sumOf { it.second }
         return sum.toFloat()
+    }
+
+    private fun currentUiStepsDelta(now: Long): Long {
+        // 최근 10초 안에 step 이벤트가 있었을 때만 delta 유지
+        return if (lastStepEventAt > 0 && now - lastStepEventAt <= 10_000L) {
+            lastStepsDelta
+        } else {
+            0L
+        }
     }
 
     private fun broadcastBioUpdateThrottled() {
@@ -245,12 +279,16 @@ class BioMeasureService : Service() {
     }
 
     private fun broadcastBioUpdate() {
+        val now = System.currentTimeMillis()
+        val currentSpm = computeStepsPerMin(now)
+        val currentDelta = currentUiStepsDelta(now)
+
         val i = Intent(ACTION_UPDATE).apply {
             setPackage(packageName)
             putExtra(EXTRA_HR_BPM, lastHr)
             putExtra(EXTRA_STEPS_DAILY, lastStepsDaily)
-            putExtra(EXTRA_STEPS_DELTA, lastStepsDelta)
-            putExtra(EXTRA_STEPS_PER_MIN, lastStepsPerMin)
+            putExtra(EXTRA_STEPS_DELTA, currentDelta)
+            putExtra(EXTRA_STEPS_PER_MIN, currentSpm)
             putExtra(EXTRA_HRV_RMSSD, lastHrvRmssd)
         }
         sendBroadcast(i)
