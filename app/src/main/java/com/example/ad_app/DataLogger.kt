@@ -134,29 +134,19 @@ object DataLogger {
     // ── HRV ─────────────────────────────────────────
 
     fun updateBioHrv(hrvRmssd: Float, hrvSampleCount: Int) {
-        if (hrvRmssd < 0) {
-            Log.d(TAG, "updateBioHrv SKIP invalid rmssd=$hrvRmssd n=$hrvSampleCount")
-            return
-        }
+        if (hrvRmssd < 0) return
 
-        // 이전 값과 완전히 동일하면 updatedAt을 갱신하지 않는다.
-        // HrvTracker가 동일한 RMSSD를 반복 emit해도 hrv_age_ms가 리셋되지 않으므로
-        // "마지막으로 진짜 새 값이 계산된 시점"을 정확히 추적할 수 있다.
-        val isNewValue = (hrvRmssd != bioHrv) || (hrvSampleCount != bioHrvN)
-        val now        = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
 
-        if (isNewValue) {
-            bioHrv          = hrvRmssd
-            bioHrvN         = hrvSampleCount.takeIf { it >= 0 }
-            bioHrvUpdatedAt = now
-            Log.d(TAG, "updateBioHrv NEW rmssd=$hrvRmssd n=$hrvSampleCount")
-        } else {
-            Log.d(TAG, "updateBioHrv DUPLICATE skip updatedAt rmssd=$hrvRmssd")
-        }
+        // 값이 같든 다르든 호출될 때마다 updatedAt 갱신
+        // → HrvTracker가 emit했다는 것 자체가 "새로 계산됨"을 의미
+        bioHrv          = hrvRmssd
+        bioHrvN         = hrvSampleCount.takeIf { it >= 0 }
+        bioHrvUpdatedAt = now
 
-        // 유효 기준 통과 시 lastValid 갱신 (stale 구간 공백 방지용)
+        // lastValid는 유효 기준 통과할 때만 갱신
         val valid = hrvSampleCount >= HRV_MIN_N && hrvRmssd in HRV_MIN_MS..HRV_MAX_MS
-        if (valid && isNewValue) {
+        if (valid) {
             bioHrvLastValid  = hrvRmssd
             bioHrvNLastValid = hrvSampleCount
         }
