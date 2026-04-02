@@ -3,6 +3,7 @@
     android:id="@+id/scrollRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="#000000"
     android:fillViewport="true"
     android:overScrollMode="never"
     android:scrollbars="none"
@@ -20,79 +21,77 @@
 
         <TextView
             android:id="@+id/tvLux"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="조도: - lux"
-            android:textSize="18sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:lineSpacingExtra="2dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp" />
+            android:paddingTop="5dp"
+            android:paddingBottom="5dp" />
 
         <TextView
             android:id="@+id/tvNoise"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="소음(상대): - dBFS"
-            android:textSize="18sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:lineSpacingExtra="2dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="14dp" />
+            android:paddingTop="5dp"
+            android:paddingBottom="10dp" />
 
         <TextView
             android:id="@+id/tvWifi"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="WiFi: -"
-            android:textSize="16sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:paddingTop="6dp"
-            android:paddingBottom="12dp" />
+            android:paddingTop="5dp"
+            android:paddingBottom="10dp" />
 
         <TextView
             android:id="@+id/tvHr"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="심박: - bpm"
-            android:textSize="18sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp" />
+            android:paddingTop="5dp"
+            android:paddingBottom="5dp" />
 
         <TextView
             android:id="@+id/tvSteps"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="걸음 수(오늘): -"
-            android:textSize="18sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp" />
+            android:paddingTop="5dp"
+            android:paddingBottom="5dp" />
 
         <TextView
             android:id="@+id/tvHrv"
+            android:textColor="#FFFFFF"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="HRV(RMSSD): - ms"
-            android:textSize="16sp"
+            android:textSize="15sp"
             android:gravity="center"
-            android:includeFontPadding="false"
-            android:paddingTop="6dp"
-            android:paddingBottom="12dp" />
-
+            android:paddingTop="5dp"
+            android:paddingBottom="10dp" />
 
         <Button
             android:id="@+id/btnStart"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="44dp"
-            android:text="측정 시작" />
+            android:text="측정 시작"
+            android:textColor="#FFFFFF" />
 
         <Button
             android:id="@+id/btnStop"
@@ -101,9 +100,10 @@
             android:minHeight="44dp"
             android:layout_marginTop="10dp"
             android:text="측정 중단"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#333333"
             android:enabled="false" />
 
-        <!-- 아래가 원형 화면에서 잘릴 때 대비 여유 -->
         <Space
             android:layout_width="match_parent"
             android:layout_height="10dp" />
